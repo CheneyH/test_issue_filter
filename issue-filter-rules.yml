@@ -1,0 +1,135 @@
+version: 1
+mode: high_precision
+
+policy:
+  default_action: allow
+  reject_action: reject
+  only_block_categories:
+    - aggressive_drama_bait
+    - content_empty
+
+signals:
+  allow_if_any:
+    technical_markers:
+      - regex: '(?i)repro(duce|duction)? steps?'
+      - regex: '(?i)steps? to repro(duce)?'
+      - regex: '(?i)expected behavior'
+      - regex: '(?i)actual behavior'
+      - regex: '(?i)environment'
+      - regex: '(?i)version'
+      - regex: '(?i)stack trace'
+      - regex: '(?i)error|exception|traceback|500|404|403|timeout'
+      - regex: '(?i)windows|macos|linux|ubuntu|chrome|firefox|safari|edge'
+      - regex: '(?i)api|endpoint|upload|download|login|search|deploy|build'
+      - regex: '(?i)v\d+\.\d+(?:\.\d+)?'
+      - regex: '`[^`]+`'
+      - regex: '```[\s\S]+```'
+
+  aggressive_drama_bait:
+    description: Block only obviously abusive, shaming, rumor-spreading, or drama-baiting issues.
+    reject_if_all:
+      - any_keyword_groups_hit_at_least: 1
+      - technical_marker_hits_at_most: 0
+      - constructive_signal_hits_at_most: 0
+    reject_if_any:
+      direct_patterns:
+        - regex: '(?i)骗(子|用户)|割韭菜|刷星|买星|造假|作秀|污染开源圈'
+        - regex: '(?i)垃圾项目|恶心|傻逼|脑残|废物'
+        - regex: '(?i)大家都来看看|建议避雷|转发出去|别再给这个项目贡献'
+        - regex: '(?i)故意不修|就是为了热度|根本不是开源|纯营销项目'
+    keyword_groups:
+      insult:
+        - 垃圾
+        - 恶心
+        - 骗子
+        - 傻逼
+        - 脑残
+        - 废物
+      rumor_or_reputation_attack:
+        - 割韭菜
+        - 刷星
+        - 买星
+        - 造假
+        - 作秀
+        - 骗用户
+        - 污染开源圈
+      motive_attack:
+        - 故意不修
+        - 为了热度
+        - 根本不是开源
+        - 纯营销项目
+      incitement:
+        - 大家都来看看
+        - 建议避雷
+        - 转发出去
+        - 别再给这个项目贡献
+    constructive_signals:
+      - regex: '(?i)because|since|when|after|before'
+      - regex: '(?i)建议|proposal|suggestion|could you|please consider'
+      - regex: '(?i)复现|重现|步骤|日志|报错|现象|期望'
+
+  content_empty:
+    description: Block only obviously content-empty, low-information, or pure-noise issues.
+    reject_if_any:
+      - effective_text_length_less_than: 12
+      - exact_match_in:
+          - rt
+          - RT
+          - 如题
+          - 顶
+          - 1111
+          - 111111
+          - ???
+          - 。。。
+          - 加油
+      - regex_match_any:
+          - '^(?i)(优化一下|建议优化|有问题|有个问题|帮忙看下|快点修|尽快处理)[!！。.]?$'
+          - '^(?i)(support|+1|up|same here)$'
+          - '^(.)\1{5,}$'
+          - '^(\W|_)+$'
+      - template_shell_without_content: true
+    reject_if_all:
+      - technical_marker_hits_at_most: 0
+      - meaningful_noun_hits_at_most: 0
+    template_fields:
+      - 问题描述
+      - 复现步骤
+      - 期望结果
+      - actual behavior
+      - expected behavior
+      - steps to reproduce
+    empty_template_values:
+      - 无
+      - 没有
+      - 如题
+      - 同上
+      - 自己看
+      - 很多问题
+      - n/a
+      - none
+
+safeguards:
+  force_allow_if_any:
+    - has_code_block: true
+    - has_stack_trace: true
+    - has_version_number: true
+    - has_environment_info: true
+    - has_repro_steps: true
+    - has_error_message: true
+    - has_specific_module_or_feature_name: true
+  notes:
+    - Do not reject normal complaints if they contain a concrete bug, reproducible behavior, logs, versions, or actionable suggestions.
+    - This file is intentionally high precision and low recall.
+
+normalization:
+  lowercase: true
+  trim_whitespace: true
+  collapse_repeated_whitespace: true
+  remove_punctuation_for_length_check: true
+
+output:
+  include_reason: true
+  include_category: true
+  categories:
+    aggressive_drama_bait: obvious aggressive or drama-bait issue
+    content_empty: obvious content-empty or noise issue
