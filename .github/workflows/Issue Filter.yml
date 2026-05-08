@@ -168,8 +168,6 @@ jobs:
                   has_version_number(text),
                   has_environment_info(text),
                   has_repro_steps(text),
-                  has_error_message(text),
-                  has_specific_module_or_feature_name(text),
               ])
 
           def github_request(method, url, token, payload=None):

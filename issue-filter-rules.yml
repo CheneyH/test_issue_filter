@@ -37,6 +37,7 @@ signals:
         - regex: '(?i)垃圾项目|恶心|傻逼|脑残|废物'
         - regex: '(?i)大家都来看看|建议避雷|转发出去|别再给这个项目贡献'
         - regex: '(?i)故意不修|就是为了热度|根本不是开源|纯营销项目'
+        - regex: '(?i)技术生涯.*污点|名声坏了再想挽回|未来五年甚至十年的声誉|给社区一个公开说明|写个 postmortem'
     keyword_groups:
       insult:
         - 垃圾
@@ -83,8 +84,8 @@ signals:
           - 。。。
           - 加油
       - regex_match_any:
-          - '^(?i)(优化一下|建议优化|有问题|有个问题|帮忙看下|快点修|尽快处理)[!！。.]?$'
-          - '^(?i)(support|+1|up|same here)$'
+          - '(?i)^(优化一下|建议优化|有问题|有个问题|帮忙看下|快点修|尽快处理)[!！。.]?$'
+          - '(?i)^(support|\+1|up|same here)$'
           - '^(.)\1{5,}$'
           - '^(\W|_)+$'
       - template_shell_without_content: true
