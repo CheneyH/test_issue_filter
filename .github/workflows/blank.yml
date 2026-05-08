@@ -1,0 +1,239 @@
+name: Issue Filter
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  filter-issue:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Evaluate issue against rules
+        id: evaluate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RULES_PATH: issue-filter-rules.yml
+        shell: bash
+        run: |
+          python <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+          import yaml
+
+          def load_event(path):
+              with open(path, 'r', encoding='utf-8') as f:
+                  return json.load(f)
+
+          def load_rules(path):
+              with open(path, 'r', encoding='utf-8') as f:
+                  return yaml.safe_load(f)
+
+          def normalize(text):
+              text = (text or '').replace('\r\n', '\n').strip()
+              text = re.sub(r'\s+', ' ', text)
+              return text
+
+          def effective_text_length(text):
+              compact = re.sub(r'[\s\W_]+', '', text, flags=re.UNICODE)
+              return len(compact)
+
+          def regex_hits(text, items):
+              hits = 0
+              for item in items:
+                  pattern = item.get('regex') if isinstance(item, dict) else item
+                  if pattern and re.search(pattern, text, re.DOTALL):
+                      hits += 1
+              return hits
+
+          def exact_match_any(text, values):
+              t = text.strip()
+              return any(t == v for v in values)
+
+          def keyword_group_hits(text, groups):
+              hits = 0
+              for _, keywords in groups.items():
+                  if any(k in text for k in keywords):
+                      hits += 1
+              return hits
+
+          def has_code_block(text):
+              return '```' in text or bool(re.search(r'`[^`]+`', text))
+
+          def has_stack_trace(text):
+              patterns = [r'traceback', r'exception', r'\bat\s+\S+\(', r'\.java:\d+', r'panic:', r'error:']
+              return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+
+          def has_version_number(text):
+              return bool(re.search(r'\bv\d+\.\d+(?:\.\d+)?\b|\b\d+\.\d+(?:\.\d+)?\b', text, re.IGNORECASE))
+
+          def has_environment_info(text):
+              return bool(re.search(r'windows|macos|linux|ubuntu|chrome|firefox|safari|edge|docker|k8s|kubernetes', text, re.IGNORECASE))
+
+          def has_repro_steps(text):
+              return bool(re.search(r'repro(duce|duction)? steps?|steps? to repro(duce)?|复现|重现|步骤', text, re.IGNORECASE))
+
+          def has_error_message(text):
+              return bool(re.search(r'error|exception|traceback|timeout|500|404|403|报错|错误', text, re.IGNORECASE))
+
+          def has_specific_module_or_feature_name(text):
+              patterns = [
+                  r'`[^`]+`',
+                  r'\b[A-Za-z][A-Za-z0-9_-]{2,}\/[A-Za-z0-9_.-]+\b',
+                  r'\b(?:api|endpoint|upload|download|login|search|deploy|build|storage|auth)\b',
+                  r'\/[A-Za-z0-9_\-\/]+',
+              ]
+              return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+
+          def technical_marker_hits(text, rules):
+              markers = rules['signals']['allow_if_any']['technical_markers']
+              return regex_hits(text, markers)
+
+          def constructive_signal_hits(text, aggressive_rules):
+              return regex_hits(text, aggressive_rules.get('constructive_signals', []))
+
+          def meaningful_noun_hits(text):
+              patterns = [
+                  r'\b(api|login|search|deploy|build|upload|download|page|button|form|token|session|docker|postgres|redis|minio)\b',
+                  r'[A-Za-z][A-Za-z0-9_-]{3,}',
+                  r'[一-鿿]{2,}(接口|页面|按钮|登录|搜索|部署|上传|下载|功能|模块|服务|配置|报错)'
+              ]
+              return sum(1 for p in patterns if re.search(p, text, re.IGNORECASE))
+
+          def template_shell_without_content(text, content_rules):
+              fields = content_rules.get('template_fields', [])
+              empties = set(v.lower() for v in content_rules.get('empty_template_values', []))
+              found_fields = [f for f in fields if f.lower() in text.lower()]
+              if len(found_fields) < 2:
+                  return False
+              lowered = text.lower()
+              empty_count = sum(1 for v in empties if v in lowered)
+              return empty_count >= 1
+
+          def evaluate_aggressive(text, rules, technical_hits):
+              aggressive = rules['signals']['aggressive_drama_bait']
+              direct_patterns = aggressive.get('reject_if_any', {}).get('direct_patterns', [])
+              if regex_hits(text, direct_patterns) > 0 and technical_hits == 0:
+                  return True, 'aggressive_drama_bait', '命中明显攻击性/带节奏表达，且缺少具体问题信息'
+
+              group_hits = keyword_group_hits(text, aggressive.get('keyword_groups', {}))
+              constructive_hits = constructive_signal_hits(text, aggressive)
+              if group_hits >= 1 and technical_hits == 0 and constructive_hits == 0:
+                  return True, 'aggressive_drama_bait', '命中攻击性或声誉攻击词，且没有建设性内容'
+
+              return False, None, None
+
+          def evaluate_empty(text, rules, technical_hits):
+              content_rules = rules['signals']['content_empty']
+              text_stripped = text.strip()
+              if exact_match_any(text_stripped, content_rules['reject_if_any'][1]['exact_match_in']) and technical_hits == 0:
+                  return True, 'content_empty', '正文属于明显空洞短句'
+
+              for pattern in content_rules['reject_if_any'][2]['regex_match_any']:
+                  if re.search(pattern, text_stripped, re.DOTALL) and technical_hits == 0:
+                      return True, 'content_empty', '正文命中明显空洞/噪声模式'
+
+              if effective_text_length(text_stripped) < content_rules['reject_if_any'][0]['effective_text_length_less_than'] and technical_hits == 0 and meaningful_noun_hits(text_stripped) == 0:
+                  return True, 'content_empty', '正文过短且没有具体信息'
+
+              if content_rules['reject_if_any'][3].get('template_shell_without_content') and template_shell_without_content(text_stripped, content_rules) and technical_hits == 0:
+                  return True, 'content_empty', '只有模板外壳，没有有效内容'
+
+              return False, None, None
+
+          def force_allow(text):
+              return any([
+                  has_code_block(text),
+                  has_stack_trace(text),
+                  has_version_number(text),
+                  has_environment_info(text),
+                  has_repro_steps(text),
+                  has_error_message(text),
+                  has_specific_module_or_feature_name(text),
+              ])
+
+          def github_request(method, url, token, payload=None):
+              headers = {
+                  'Authorization': f'Bearer {token}',
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'issue-filter-action'
+              }
+              data = None
+              if payload is not None:
+                  data = json.dumps(payload).encode('utf-8')
+                  headers['Content-Type'] = 'application/json'
+              req = urllib.request.Request(url, data=data, headers=headers, method=method)
+              with urllib.request.urlopen(req) as resp:
+                  return resp.read().decode('utf-8') if resp.length != 0 else ''
+
+          event = load_event(os.environ['GITHUB_EVENT_PATH'])
+          rules = load_rules(os.environ['RULES_PATH'])
+          repo = os.environ['GITHUB_REPOSITORY']
+          token = os.environ['GITHUB_TOKEN']
+
+          issue = event['issue']
+          issue_number = issue['number']
+          title = normalize(issue.get('title', ''))
+          body = normalize(issue.get('body', ''))
+          combined = f"{title}\n\n{body}"
+
+          if force_allow(combined):
+              print('decision=allow')
+              print('category=')
+              print('reason=命中放行保护条件，视为有效 issue')
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+                  out.write('decision=allow\n')
+                  out.write('category=\n')
+                  out.write('reason=命中放行保护条件，视为有效 issue\n')
+              raise SystemExit(0)
+
+          technical_hits = technical_marker_hits(combined, rules)
+
+          rejected, category, reason = evaluate_aggressive(combined, rules, technical_hits)
+          if not rejected:
+              rejected, category, reason = evaluate_empty(combined, rules, technical_hits)
+
+          decision = 'reject' if rejected else 'allow'
+          print(f'decision={decision}')
+          print(f'category={category or ""}')
+          print(f'reason={reason or "未命中拒绝规则"}')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              out.write(f'decision={decision}\n')
+              out.write(f'category={category or ""}\n')
+              out.write(f'reason={reason or "未命中拒绝规则"}\n')
+
+          if decision == 'reject':
+              comment_body = (
+                  '该 issue 已被自动关闭。\n\n'
+                  f'- 分类: `{category}`\n'
+                  f'- 原因: {reason}\n\n'
+                  '当前仓库只会自动拦截两类内容：\n'
+                  '1. 明显攻击性/带节奏内容\n'
+                  '2. 明显空洞、缺少具体信息的内容\n\n'
+                  '如果这是误判，请按以下方式重新提交：补充复现步骤、环境信息、版本号、日志或明确的问题现象。'
+              )
+              base = f'https://api.github.com/repos/{repo}/issues/{issue_number}'
+              github_request('POST', f'{base}/comments', token, {'body': comment_body})
+              github_request('PATCH', base, token, {'state': 'closed'})
+          PY
